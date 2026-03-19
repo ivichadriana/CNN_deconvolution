@@ -1,67 +1,64 @@
 #!/bin/sh
 
-#SBATCH --job-name=tune_CNN_MNIST
+#SBATCH --job-name=tune_TRANS_MNIST
 #SBATCH --account=amc-general
-#SBATCH --output=output_CNN_MNIST.log
-#SBATCH --error=error_tune_CNN_MNIST.log
+#SBATCH --output=output_TRANS_MNIST.log
+#SBATCH --error=error_tune_TRANS_MNIST.err
 #SBATCH --mail-type=ALL
 #SBATCH --partition=amilan
 #SBATCH --qos=normal
-#SBATCH --time=03:00:00
+#SBATCH --time=06:00:00
 #SBATCH --nodes=1
-#SBATCH --ntasks=1              # <--- Only one rank
-#SBATCH --cpus-per-task=64      # <--- The one rank has 64 CPUs
-#SBATCH --exclude=c3cpu-c15-u34-2
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=64
 
-''' The following file is meant to tune the model of choosing using tune.py '''
-''' Please change variables below to match the model type and data type you want to tune '''
-
-# Activate the virtual environment
-echo "****** Activating environment... ******"
+echo "Activating environment..."
 source ~/.bashrc
 conda deactivate
 conda activate env_cnn
 
-ray stop
+sleep 5
 
-sleep 10
-# Double-check which python and ray we are using:
-which python
-which ray
+# -----------------------------------------------------------------------------
+# Change to the directory containing this Slurm script and 'tune.py'
+cd "$(dirname "$0")"
+echo "Running in directory: $(pwd)"
 
-##########################################################################################
-
-# Start Ray
-# Pick a port
-PORT=1190
-
-export RAY_TMPDIR=""
-
-# # Start Ray HEAD on this node:
-# ray start --head --port=$PORT --temp-dir="$RAY_TMPDIR"
-
-# Define parameters
-MODEL_TYPE="CNN"
+# Model/Dataset parameters
+MODEL_TYPE="TRANS"
 DATASET="MNIST"
-TMP_DIR=""
-WORKING_DIR=""
-OUTPUT_PATH="CNN_deconvolution/data/images/best_configs_${MODEL_TYPE}_${DATASET}.json"
-PCAM_DATA_PATH="CNN_deconvolution/data/pcamv1/"
 NUM_ITERATIONS="1"
 
-# Run the script with parameters
-echo "Running script with model_type=$MODEL_TYPE, dataset=$DATASET..."
-srun $(which python) CNN_deconvolution/scripts/tune.py \
-    --model_type $MODEL_TYPE \
-    --dataset $DATASET \
-    --tmp_dir $TMP_DIR \
-    --working_dir $WORKING_DIR \
-    --output_path $OUTPUT_PATH \
-    --pcam_data_path $PCAM_DATA_PATH \
-    --num_iterations $NUM_ITERATIONS \
+# HPC-specific large-scratch path
+#   If you move HPCs, you only need to update this prefix
+SCRATCH_PREFIX="/scratch/alpine/$USER"
 
-#############################################################################################
-# Deactivate the conda environment and stop final ray
-ray stop
+# Subdirectories for Ray
+TMP_DIR="${SCRATCH_PREFIX}/rayt"
+WORKING_DIR="${SCRATCH_PREFIX}/rayw"
+
+# Output JSON location is still relative to *this* directory:
+OUTPUT_PATH="./data/best_configs_allshuffle_${MODEL_TYPE}_${DATASET}.json"
+
+# PCam data path might be large, so let's also keep that on scratch
+PCAM_DATA_PATH="${SCRATCH_PREFIX}/data/pcamv1"
+
+echo "TMP_DIR: $TMP_DIR"
+echo "WORKING_DIR: $WORKING_DIR"
+echo "OUTPUT_PATH: $OUTPUT_PATH"
+echo "PCAM_DATA_PATH: $PCAM_DATA_PATH"
+
+export RAY_TMPDIR="$TMP_DIR"
+
+echo "Running script with model_type=$MODEL_TYPE, dataset=$DATASET..."
+srun $(which python) tune.py \
+    --model_type "$MODEL_TYPE" \
+    --dataset "$DATASET" \
+    --tmp_dir "$TMP_DIR" \
+    --working_dir "$WORKING_DIR" \
+    --output_path "$OUTPUT_PATH" \
+    --pcam_data_path "$PCAM_DATA_PATH" \
+    --num_iterations "$NUM_ITERATIONS"
+
 sleep 5
 conda deactivate

@@ -3,63 +3,112 @@ import json
 import ray
 import torch
 import sys
-from ray import tune
-from pathlib import Path
-from torch.utils.data import DataLoader, random_split, Dataset
-from ray.tune.schedulers import ASHAScheduler
-from ray.air.config import RunConfig
 import argparse
 import shutil
-import uuid
+import random
+from pathlib import Path
+from ray import tune
+from ray.tune.schedulers import ASHAScheduler
 
 # Ensure PYTHONPATH includes the parent directory of 'src'
 sys.path.insert(1, '../../')
 sys.path.insert(1, '../')
 sys.path.insert(1, '../../../../../')
-print("Updated PYTHONPATH:", sys.path)  # Debugging line
+print("Updated PYTHONPATH:", sys.path)
 
-from src.utils import SimpleMLP, SimpleCNN_3CH, SimpleCNN, PCamDataset, load_training_data, get_dimensions
+from src.utils import (
+    SimpleMLP,
+    SimpleCNN_3CH,
+    SimpleTransformer,
+    SimpleCNN,
+    load_training_data_fullshuffle,
+    get_dimensions,
+)
 
 script_dir = Path(__file__).resolve().parent
 
-def train_model(config, 
-                model_type, 
-                dataset, 
-                image_dim, 
-                pcam_data_path=None):
 
-    train_loader, val_loader, _, _ = load_training_data(dataset = dataset,
-                                                    batch_size=config["batch_size"],
-                                                    val_split = 0.2,
-                                                    pcam_data_path=pcam_data_path)
-    if model_type == "MLP":
-        model = SimpleMLP(
-            input_dim= image_dim * image_dim,
-            fc1_hidden=config["fc1_hidden"],
-            fc2_hidden=config["fc2_hidden"],
-            fc3_hidden=config["fc3_hidden"]
+def train_model(config, model_type, dataset, image_dim, pcam_data_path=None):
+    train_loader, val_loader, _ = load_training_data_fullshuffle(
+        dataset=dataset,
+        batch_size=config["batch_size"],
+        val_split=0.2,
+        pcam_data_path=pcam_data_path
+    )
+
+    if model_type in ["MLP", "MLP_3CH"]:
+        if "CIFAR10" in dataset or "PCam" in dataset:
+            in_channels = 3
+            model = SimpleMLP(
+                input_dim=in_channels * image_dim * image_dim,
+                fc1_hidden=config["fc1_hidden"],
+                fc2_hidden=config["fc2_hidden"],
+                fc3_hidden=config["fc3_hidden"],
+                dropout=config["dropout"]
             )
-    elif model_type == 'MLP_3CH':
-        model = SimpleMLP(
-            input_dim= 3 * image_dim * image_dim,
-            fc1_hidden=config["fc1_hidden"],
-            fc2_hidden=config["fc2_hidden"],
-            fc3_hidden=config["fc3_hidden"]
+        elif "MNIST" in dataset:
+            model = SimpleMLP(
+                input_dim=image_dim * image_dim,
+                fc1_hidden=config["fc1_hidden"],
+                fc2_hidden=config["fc2_hidden"],
+                fc3_hidden=config["fc3_hidden"],
+                dropout=config["dropout"]
             )
-    elif model_type == 'CNN':
-        model = SimpleCNN(
-            cha_input=config["cha_input"],
-            cha_hidden=config["cha_hidden"],
-            fc_hidden=config["fc_hidden"],
+        else:
+            raise ValueError(f"Invalid dataset: {dataset}")
+
+    elif model_type in ["CNN", "CNN_3CH"]:
+        if "CIFAR10" in dataset or "PCam" in dataset:
+            model = SimpleCNN_3CH(
+                cha_input=config["cha_input"],
+                cha_hidden=config["cha_hidden"],
+                fc_hidden=config["fc_hidden"],
+                kernel_size=config["kernel_size"],
+                stride=config["stride"],
+                padding=config["padding"],
+                dropout=config["dropout"]
             )
-    elif model_type == "CNN_3CH":
-        model = SimpleCNN_3CH(
-            cha_input=config["cha_input"],
-            cha_hidden=config["cha_hidden"],
-            fc_hidden=config["fc_hidden"]
+        elif "MNIST" in dataset:
+            model = SimpleCNN(
+                cha_input=config["cha_input"],
+                cha_hidden=config["cha_hidden"],
+                fc_hidden=config["fc_hidden"],
+                kernel_size=config["kernel_size"],
+                stride=config["stride"],
+                padding=config["padding"],
+                dropout=config["dropout"]
             )
+        else:
+            raise ValueError(f"Invalid dataset: {dataset}")
+
+    elif model_type in ["TRANS", "TRANS_3CH"]:
+        if "CIFAR10" in dataset or "PCam" in dataset:
+            model = SimpleTransformer(
+                image_size=image_dim,
+                patch_size=config["patch_size"],
+                in_channels=3,
+                emb_dim=config["emb_dim"],
+                num_heads=config["num_heads"],
+                mlp_dim=config["mlp_dim"],
+                dropout=config["dropout"]
+            )
+        elif "MNIST" in dataset:
+            model = SimpleTransformer(
+                image_size=image_dim,
+                patch_size=config["patch_size"],
+                in_channels=1,
+                emb_dim=config["emb_dim"],
+                num_heads=config["num_heads"],
+                mlp_dim=config["mlp_dim"],
+                dropout=config["dropout"]
+            )
+        else:
+            raise ValueError(f"Invalid dataset: {dataset}")
     else:
-        raise ValueError("Invalid model type!")
+        raise ValueError(f"Invalid model type: {model_type}")
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = model.to(device)
 
     criterion = torch.nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=config["learning_rate"])
@@ -67,8 +116,9 @@ def train_model(config,
     for epoch in range(25):
         model.train()
         for inputs, labels in train_loader:
-            if model_type in ["MLP", "MLP_3CH"]:
-                inputs = inputs.view(inputs.size(0), -1)  # Flatten inputs only for MLP
+            inputs = inputs.to(device)
+            labels = labels.to(device)
+
             optimizer.zero_grad()
             outputs = model(inputs)
             loss = criterion(outputs, labels)
@@ -82,10 +132,12 @@ def train_model(config,
 
         with torch.no_grad():
             for inputs, labels in val_loader:
-                if model_type in ["MLP", "MLP_3CH"]:
-                    inputs = inputs.view(inputs.size(0), -1)  # Flatten inputs only for MLP
+                inputs = inputs.to(device)
+                labels = labels.to(device)
+
                 outputs = model(inputs)
                 loss = criterion(outputs, labels)
+
                 val_loss += loss.item() * inputs.size(0)
                 _, predicted = torch.max(outputs, 1)
                 total += labels.size(0)
@@ -93,53 +145,69 @@ def train_model(config,
 
         val_loss /= total
         accuracy = correct / total
-        ray.train.report({"val_loss": val_loss, "accuracy": accuracy})
+        tune.report(val_loss=val_loss, accuracy=accuracy)
 
-def run_tuning(model_type, dataset, config, output_path, tmp_dir, working_dir, num_iterations, pcam_data_path=None, image_dim=28):
-    
+
+def run_tuning(
+    model_type,
+    dataset,
+    config,
+    output_path,
+    tmp_dir,
+    working_dir,
+    num_iterations,
+    pcam_data_path=None,
+    image_dim=28
+):
     ray.shutdown()
-    os.makedirs(working_dir, exist_ok=True)  # Create the directory if it doesn't exist
-    os.makedirs(tmp_dir, exist_ok=True)  # Create the directory if it doesn't exist
 
-    ray.init( 
+    os.makedirs(working_dir, exist_ok=True)
+    os.makedirs(tmp_dir, exist_ok=True)
+
+    ray.init(
         runtime_env={
             "working_dir": working_dir,
             "py_modules": [str(script_dir.parent / "src")],
         },
         _temp_dir=tmp_dir,
-        log_to_driver=False, include_dashboard=False 
-        )
+        log_to_driver=False,
+        include_dashboard=False
+    )
 
-    scheduler = ASHAScheduler(max_t=25, grace_period=5, metric="val_loss", mode="min")
+    scheduler = ASHAScheduler(
+        max_t=25,
+        grace_period=5,
+        metric="val_loss",
+        mode="min"
+    )
 
-    # Ensure the output dir exists
-    output_dir = os.path.dirname(output_path)  # Extract directory from output path
-    os.makedirs(output_dir, exist_ok=True)  # Create the directory if it doesn't exist
+    output_dir = os.path.dirname(output_path)
+    os.makedirs(output_dir, exist_ok=True)
 
     for i in range(num_iterations):
-
-        # Use a unique experiment name for each iteration
         experiment_name = f"tuning_iteration_{i+1}"
-        
-        # Run tuning
-        print(f"Running iteration number {i}...")
+        print(f"Running iteration number {i+1}...")
 
         analysis = tune.run(
-            tune.with_parameters(train_model, model_type=model_type, dataset=dataset, image_dim=image_dim, pcam_data_path=pcam_data_path),
+            tune.with_parameters(
+                train_model,
+                model_type=model_type,
+                dataset=dataset,
+                image_dim=image_dim,
+                pcam_data_path=pcam_data_path
+            ),
             config=config,
             num_samples=100,
             scheduler=scheduler,
             resources_per_trial={"cpu": 8},
             fail_fast=False,
             storage_path=tmp_dir,
-            name=experiment_name  # Unique experiment name
+            name=experiment_name
         )
 
-        # Get the best configuration from the current iteration
         best_config = analysis.get_best_config(metric="val_loss", mode="min")
         print(f"Best hyperparameters for iteration {i+1}: {best_config}")
 
-        # Load existing configurations if the file exists
         if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
             try:
                 with open(output_path, "r") as f:
@@ -150,10 +218,8 @@ def run_tuning(model_type, dataset, config, output_path, tmp_dir, working_dir, n
         else:
             existing_configs = []
 
-        # Append the new configuration
         existing_configs.append(best_config)
 
-        # Save the updated configurations back to the file
         try:
             with open(output_path, "w") as f:
                 json.dump(existing_configs, f, indent=4)
@@ -161,7 +227,6 @@ def run_tuning(model_type, dataset, config, output_path, tmp_dir, working_dir, n
         except IOError as e:
             print(f"Error saving configuration for iteration {i+1}: {e}")
 
-        # Clean up the temporary directory for storage
         try:
             shutil.rmtree(tmp_dir)
             os.makedirs(tmp_dir, exist_ok=True)
@@ -169,13 +234,35 @@ def run_tuning(model_type, dataset, config, output_path, tmp_dir, working_dir, n
             print(f"Failed to clean up tmp_dir: {e}")
 
     ray.shutdown()
-    
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Hyperparameter tuning for models.")
-    parser.add_argument("--model_type", type=str, choices=["MLP", "MLP_3CH", "CNN", "CNN_3CH"], required=True, help="Type of model (MLP, MLP_3CH, CNN).")
-    parser.add_argument("--dataset", type=str, choices=["MNIST", "MNISTshuffled", "FashMNIST", "FashMNISTshuffled", "CIFAR10shuffled", "CIFAR10", "PCam", "PCamshuffled"], required=True, help="Dataset to use = NAME + shuffled.")
+    parser.add_argument(
+        "--model_type",
+        type=str,
+        choices=["MLP", "MLP_3CH", "CNN", "CNN_3CH", "TRANS", "TRANS_3CH"],
+        required=True,
+        help="Type of model."
+    )
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        choices=[
+            "MNIST",
+            "MNISTshuffled",
+            "FashMNIST",
+            "FashMNISTshuffled",
+            "CIFAR10shuffled",
+            "CIFAR10",
+            "PCam",
+            "PCamshuffled"
+        ],
+        required=True,
+        help="Dataset to use."
+    )
     parser.add_argument("--tmp_dir", type=str, required=True, help="Temporary directory for Ray Tune.")
-    parser.add_argument("--working_dir", type=str, required=True, help="Working directory for Ray Tune. Must have lots of space.")
+    parser.add_argument("--working_dir", type=str, required=True, help="Working directory for Ray Tune.")
     parser.add_argument("--output_path", type=str, required=True, help="Path to save the best configurations.")
     parser.add_argument("--pcam_data_path", type=str, required=True, help="Path to the PCam data.")
     parser.add_argument("--num_iterations", type=str, required=True, help="How many times to tune 100 samples.")
@@ -186,44 +273,89 @@ if __name__ == "__main__":
 
     config = {
         "MLP": {
-            "fc1_hidden": tune.randint(208, 686),  # Number of neurons in the first fully connected layer
-            "fc2_hidden": tune.randint(110, 588),  # Number of neurons in the second fully connected layer
-            "fc3_hidden": tune.randint(58, 438),  # Number of neurons in the third fully connected layer
-            "learning_rate": tune.loguniform(1e-4, 1e-2),  # Learning rate
-            "batch_size": tune.choice([32, 64, 120]),  # Batch size
-        },
-        "MLP_3CH": {
-            "fc1_hidden": tune.randint(62, 358),
-            "fc2_hidden": tune.randint(40, 218),
-            "fc3_hidden": tune.randint(26, 90),
+            "fc1_hidden": tune.randint(196, 693),
+            "fc2_hidden": tune.randint(130, 686),
+            "fc3_hidden": tune.randint(98, 272),
             "learning_rate": tune.loguniform(1e-4, 1e-2),
-            "batch_size": tune.choice([32, 64, 120])
+            "batch_size": tune.choice([32, 64, 120]),
+            "dropout": tune.quniform(0.1, 0.6, 0.1),
         },
+
+        "MLP_3CH": {
+            "fc1_hidden": tune.randint(63, 416),
+            "fc2_hidden": tune.randint(42, 316),
+            "fc3_hidden": tune.randint(98, 316),
+            "learning_rate": tune.loguniform(1e-4, 1e-2),
+            "batch_size": tune.choice([32, 64, 120]),
+            "dropout": tune.quniform(0.1, 0.6, 0.1),
+        },
+
         "CNN": {
-            "cha_input": tune.randint(56, 86),  # Number of input channels for conv1
-            "cha_hidden": tune.randint(88, 146),  # Number of hidden channels for conv2 and conv3
-            "fc_hidden": tune.randint(98, 270),  # Number of hidden units in fully connected layer
+            "cha_input": tune.randint(56, 87),
+            "cha_hidden": tune.randint(88, 148),
+            "fc_hidden": tune.randint(98, 272),
+            "kernel_size": tune.choice([3, 5]),
+            "stride": tune.choice([1, 2]),
+            "padding": tune.choice([0, 1]),
+            "dropout": tune.quniform(0.1, 0.6, 0.1),
             "learning_rate": tune.loguniform(1e-4, 1e-2),
             "batch_size": tune.choice([32, 64, 120]),
         },
+
         "CNN_3CH": {
-            "cha_input": tune.randint(40, 80),
-            "cha_hidden": tune.randint(64, 128),
-            "fc_hidden": tune.randint(128, 256),
+            "cha_input": tune.randint(78, 212),
+            "cha_hidden": tune.randint(68, 120),
+            "fc_hidden": tune.randint(98, 273),
+            "kernel_size": tune.choice([3, 5]),
+            "stride": tune.choice([1, 2]),
+            "padding": tune.choice([0, 1]),
+            "dropout": tune.quniform(0.1, 0.6, 0.1),
             "learning_rate": tune.loguniform(1e-4, 1e-2),
-            "batch_size": tune.choice([32, 64, 120])
+            "batch_size": tune.choice([32, 64, 120]),
         },
-        
+
+        "TRANS": {
+            "patch_size": tune.choice([2, 4]),
+            "num_heads": tune.choice([1, 2]),
+            "emb_dim": tune.sample_from(
+                lambda spec: random.choice([
+                    e for e in range(102, 249)
+                    if e % spec.config.num_heads == 0
+                ])
+            ),
+            "mlp_dim": tune.randint(98, 271),
+            "dropout": tune.quniform(0.1, 0.6, 0.1),
+            "learning_rate": tune.loguniform(1e-4, 1e-2),
+            "batch_size": tune.choice([32, 64, 120]),
+        },
+
+        "TRANS_3CH": {
+            "patch_size": tune.choice([2, 4]),
+            "num_heads": tune.choice([1, 2]),
+            "emb_dim": tune.sample_from(
+                lambda spec: random.choice([
+                    e for e in range(102, 284)
+                    if e % spec.config.num_heads == 0
+                ])
+            ),
+            "mlp_dim": tune.randint(98, 271),
+            "dropout": tune.quniform(0.1, 0.6, 0.1),
+            "learning_rate": tune.loguniform(1e-4, 1e-2),
+            "batch_size": tune.choice([32, 64, 120]),
+        },
     }[args.model_type]
 
     image_dim = get_dimensions(args.dataset)
     num_iterations = int(args.num_iterations)
 
-    run_tuning(model_type=args.model_type, 
-                            dataset=args.dataset, 
-                            config=config, 
-                            output_path= args.output_path, 
-                            tmp_dir=args.tmp_dir, 
-                            working_dir=args.working_dir,
-                            pcam_data_path = args.pcam_data_path, 
-                            image_dim=image_dim, num_iterations=num_iterations)
+    run_tuning(
+        model_type=args.model_type,
+        dataset=args.dataset,
+        config=config,
+        output_path=args.output_path,
+        tmp_dir=args.tmp_dir,
+        working_dir=args.working_dir,
+        pcam_data_path=args.pcam_data_path,
+        image_dim=image_dim,
+        num_iterations=num_iterations
+    )

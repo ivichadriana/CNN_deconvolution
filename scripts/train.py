@@ -25,21 +25,35 @@ def train_and_evaluate(config, model_type, dataset, image_dim, pcam_data_path=No
     best_val_loss = float("inf")
     patience = 5  # default value for early stopping
 
-    train_loader, val_loader, shuffle_order_rows1, shuffle_order_columns1 = load_training_data(dataset = dataset,
-                                                                                            batch_size=config["batch_size"],
-                                                                                            val_split = 0.2,
-                                                                                            pcam_data_path=pcam_data_path)
+    # train_loader, val_loader, shuffle_order_rows1, shuffle_order_columns1 = load_training_data(dataset = dataset,
+    #                                                                                         batch_size=config["batch_size"],
+    #                                                                                         val_split = 0.2,
+    #                                                                                         pcam_data_path=pcam_data_path)
 
-    test_loader, shuffle_order_rows, shuffle_order_columns = load_testing_data(dataset = dataset,
-                                                                                            batch_size=config["batch_size"],
-                                                                                            pcam_data_path=pcam_data_path,
-                                                                                            shuffle_order_rows = shuffle_order_rows1,
-                                                                                            shuffle_order_columns = shuffle_order_columns1)
+    # test_loader, shuffle_order_rows, shuffle_order_columns = load_testing_data(dataset = dataset,
+    #                                                                                         batch_size=config["batch_size"],
+    #                                                                                         pcam_data_path=pcam_data_path,
+    #                                                                                         shuffle_order_rows = shuffle_order_rows1,
+    #                                                                                         shuffle_order_columns = shuffle_order_columns1)
+    ## Compare shuffle orders for consistency
+    # if shuffle_order_columns1 is not None and shuffle_order_columns is not None:
+    #     assert np.array_equal(shuffle_order_columns1, shuffle_order_columns), "Shuffle order columns do not match!"
+    # if shuffle_order_rows1 is not None and shuffle_order_rows is not None:
+    #     assert np.array_equal(shuffle_order_rows1, shuffle_order_rows), "Shuffle order rows do not match!"
+
+    train_loader, val_loader, shuffle_order1 = load_training_data(dataset = dataset,
+                                                                batch_size=config["batch_size"],
+                                                                val_split = 0.2,
+                                                                pcam_data_path=pcam_data_path)
+
+    test_loader, shuffle_order2 = load_testing_data(dataset = dataset,
+                                                    batch_size=config["batch_size"],
+                                                    pcam_data_path=pcam_data_path,
+                                                    shuffle_order= shuffle_order1)
+                        
     # Compare shuffle orders for consistency
-    if shuffle_order_columns1 is not None and shuffle_order_columns is not None:
-        assert np.array_equal(shuffle_order_columns1, shuffle_order_columns), "Shuffle order columns do not match!"
-    if shuffle_order_rows1 is not None and shuffle_order_rows is not None:
-        assert np.array_equal(shuffle_order_rows1, shuffle_order_rows), "Shuffle order rows do not match!"
+    if shuffle_order2 is not None:
+        assert np.array_equal(shuffle_order1, shuffle_order2), "Shuffle order does not match!"
 
     if model_type == "MLP":
         model = SimpleMLP(
